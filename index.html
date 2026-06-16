@@ -178,6 +178,34 @@
   .plan-item .del{ border:none; background:transparent; color: var(--hint); font-size:19px; line-height:1; cursor:pointer; padding:2px 4px; flex:none; }
   .plan-item .del:active{ color: var(--danger); }
 
+  /* ---- Подсказка и кликабельные строки ---- */
+  .hint-line{ color: var(--hint); font-size: 12.5px; margin: -4px 0 12px; }
+  .entry.tappable{ cursor: pointer; }
+  .entry.tappable:active{ background: rgba(127,127,127,0.10); border-radius: 8px; }
+  .entry .edit{ border:none; background:transparent; color: var(--hint); font-size: 16px; line-height:1; cursor:pointer; padding:2px 4px; flex:none; }
+  .entry .edit:active{ color: var(--button); }
+
+  /* ---- Журнал по дням ---- */
+  .hist-nav{ display:flex; align-items:center; gap:8px; margin-bottom: 10px; }
+  .hist-nav button{ border:1px solid var(--separator); background:transparent; color: var(--text);
+    border-radius:10px; padding:9px 14px; font-size:16px; cursor:pointer; font-family:var(--ui); flex:none; }
+  .hist-nav #hist-date{ flex:1; min-width:0; background: var(--field); color: var(--text); border:none;
+    border-radius:10px; padding:10px 12px; font-size:15px; font-family:var(--ui); text-align:center; }
+  .hist-total{ color: var(--hint); font-size: 12.5px; margin-bottom: 8px; }
+  .hist-empty{ color: var(--hint); font-size:14px; padding:4px 0; }
+
+  /* ---- Редактор записи ---- */
+  .hist-edit{ padding: 12px 0; border-bottom: 1px solid var(--separator); }
+  .he-input{ background: var(--field); color: var(--text); border:none; outline:none;
+    border-radius:10px; padding:10px 12px; font-size:15px; font-family:var(--ui); }
+  .hist-edit #he-task{ width:100%; margin-bottom:8px; }
+  .cat-toggle.small{ gap:6px; margin-bottom:8px; }
+  .cat-toggle.small .cat{ padding:7px 4px; font-size:12.5px; }
+  .he-time{ display:flex; gap:8px; margin-bottom:8px; }
+  .he-time .he-input{ flex:1; min-width:0; text-align:center; }
+  .he-actions{ display:flex; gap:8px; }
+  .he-actions .btn{ flex:1; padding:10px; font-size:14px; }
+
   footer{ text-align:center; margin-top: 8px; }
 
   @media (prefers-reduced-motion: reduce){
@@ -235,7 +263,20 @@
 <!-- ЖУРНАЛ ЗА СЕГОДНЯ -->
 <section class="card">
   <h2>Сегодня</h2>
+  <p class="hint-line">Нажмите на задачу, чтобы продолжить запись времени в неё.</p>
   <div id="log"></div>
+</section>
+
+<!-- ЖУРНАЛ ПО ДНЯМ -->
+<section class="card history">
+  <h2>Журнал по дням</h2>
+  <div class="hist-nav">
+    <button id="hist-prev" aria-label="Предыдущий день">←</button>
+    <input id="hist-date" type="date" />
+    <button id="hist-next" aria-label="Следующий день">→</button>
+  </div>
+  <div class="hist-total" id="hist-total"></div>
+  <div id="hist-list"></div>
 </section>
 
 <!-- ДОБАВИТЬ ВРУЧНУЮ -->
@@ -467,9 +508,9 @@ function currentElapsed(){
   if (!state.running) return 0;
   return state.running.acc + (state.running.since ? (Date.now() - state.running.since)/1000 : 0);
 }
-async function startTimer(){
+async function startTimer(mergeId){
   const task = document.getElementById('task').value.trim();
-  state.running = { t: task, c: selectedCat, acc: 0, since: Date.now(), day: todayStr() };
+  state.running = { t: task, c: selectedCat, acc: 0, since: Date.now(), day: todayStr(), mergeId: mergeId || null };
   await persistRunning();
   haptic('start');
   renderAll();
@@ -495,12 +536,33 @@ async function stopTimer(){
   state.running = null;
   await persistRunning();
   if (r && total >= 1){
-    state.entries.push({ i: genId(), t: (r.t || 'Без названия'), c: r.c, s: Math.round(total), date: r.day, ts: Date.now() });
-    await persistDay(r.day);
+    const add = Math.round(total);
+    let merged = null;
+    if (r.mergeId) merged = state.entries.find(x => x.i === r.mergeId);
+    if (merged){
+      merged.s += add;
+      merged.ts = Date.now();
+      await persistDay(merged.date);
+    } else {
+      state.entries.push({ i: genId(), t: (r.t || 'Без названия'), c: r.c, s: add, date: r.day, ts: Date.now() });
+      await persistDay(r.day);
+    }
   }
   haptic('ok');
   document.getElementById('task').value = '';
-  renderControls(); renderAll();
+  renderAll();
+}
+async function continueEntry(id){
+  if (state.running) { haptic('warn'); return; }   // сначала остановите текущий таймер
+  const e = state.entries.find(x => x.i === id);
+  if (!e) return;
+  e.ts = Date.now();                                // поднимаем запись наверх списка
+  await persistDay(e.date);
+  document.getElementById('task').value = e.t || '';
+  selectedCat = e.c;
+  setCatUI(selectedCat);
+  await startTimer(e.i);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 async function deleteEntry(id){
   const e = state.entries.find(x => x.i === id);
@@ -588,38 +650,55 @@ function renderStats(){
   document.getElementById('t-k-goal').textContent = '/ ' + NORM.COMM_DAY + ':00';
   document.getElementById('m-k-goal').textContent = '/ ' + NORM.COMM_MONTH + ':00';
 }
+function liveDurText(){
+  if (!state.running) return '0:00:00';
+  if (state.running.mergeId){
+    const e = state.entries.find(x => x.i === state.running.mergeId);
+    return fmtHMS((e ? e.s : 0) + currentElapsed());
+  }
+  return fmtHMS(currentElapsed());
+}
 function renderLog(){
   const log = document.getElementById('log');
   log.innerHTML = '';
   const today = todayStr();
+  const run = state.running;
+  const mergeId = run && run.mergeId;
 
-  if (state.running){
+  // отдельная строка «идёт» — только для новой задачи (не продолжение существующей)
+  if (run && !mergeId){
     const row = document.createElement('div');
     row.className = 'entry live';
     row.innerHTML =
-      '<span class="tag ' + state.running.c + '"></span>' +
+      '<span class="tag ' + run.c + '"></span>' +
       '<span class="task"></span>' +
       '<span class="dur" id="live-dur"></span>';
-    row.querySelector('.task').textContent = (state.running.t || 'Без названия') + ' · идёт';
+    row.querySelector('.task').textContent = (run.t || 'Без названия') + ' · идёт';
+    row.querySelector('#live-dur').textContent = liveDurText();
     log.appendChild(row);
   }
 
   const items = state.entries.filter(e => e.date === today).sort((a,b) => (b.ts||0) - (a.ts||0));
-  if (items.length === 0 && !state.running){
+  if (items.length === 0 && !run){
     log.innerHTML = '<div class="empty">Пока нет записей. Запустите таймер выше.</div>';
     return;
   }
   for (const e of items){
+    const isLive = mergeId === e.i;
     const row = document.createElement('div');
-    row.className = 'entry';
+    row.className = 'entry' + (isLive ? ' live' : '') + (run ? '' : ' tappable');
     row.innerHTML =
       '<span class="tag ' + e.c + '"></span>' +
       '<span class="task"></span>' +
-      '<span class="dur"></span>' +
+      '<span class="dur"' + (isLive ? ' id="live-dur"' : '') + '></span>' +
       '<button class="del" aria-label="Удалить">×</button>';
-    row.querySelector('.task').textContent = e.t || 'Без названия';
-    row.querySelector('.dur').textContent = fmtHM(e.s);
-    row.querySelector('.del').addEventListener('click', () => deleteEntry(e.i));
+    row.querySelector('.task').textContent = (e.t || 'Без названия') + (isLive ? ' · идёт' : '');
+    row.querySelector('.dur').textContent = isLive ? liveDurText() : fmtHM(e.s);
+    const del = row.querySelector('.del');
+    del.addEventListener('click', (ev) => { ev.stopPropagation(); deleteEntry(e.i); });
+    if (!run){
+      row.addEventListener('click', () => continueEntry(e.i));
+    }
     log.appendChild(row);
   }
 }
@@ -628,6 +707,102 @@ function renderAll(){
   renderStats();
   renderLog();
   renderPlan();
+  renderHistory();
+}
+
+/* ---- Журнал по дням + правка задним числом ---- */
+let histDate = null;          // выбранная дата (YYYY-MM-DD)
+let editingId = null;         // id записи в режиме редактирования
+let editCat = 'k';
+
+function shiftHistDate(deltaDays){
+  const p = histDate.split('-').map(Number);
+  const d = new Date(p[0], p[1]-1, p[2]);
+  d.setDate(d.getDate() + deltaDays);
+  histDate = fmtDate(d);
+  editingId = null;
+  document.getElementById('hist-date').value = histDate;
+  renderHistory();
+}
+async function saveEdit(id){
+  const e = state.entries.find(x => x.i === id);
+  if (!e) return;
+  const h = parseInt(document.getElementById('he-h').value, 10) || 0;
+  const m = parseInt(document.getElementById('he-m').value, 10) || 0;
+  const sec = h*3600 + m*60;
+  if (sec <= 0){ haptic('warn'); return; }
+  e.t = document.getElementById('he-task').value.trim() || 'Без названия';
+  e.c = editCat;
+  e.s = sec;
+  await persistDay(e.date);
+  editingId = null;
+  haptic('ok');
+  renderAll();
+}
+function renderHistory(){
+  if (!histDate) histDate = todayStr();
+  const list = document.getElementById('hist-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  const t = totals(histDate, histDate);
+  document.getElementById('hist-total').textContent =
+    'Коммерч. ' + fmtHM(t.k) + '  ·  Некоммерч. ' + fmtHM(t.n);
+
+  const items = state.entries.filter(e => e.date === histDate).sort((a,b) => (b.ts||0) - (a.ts||0));
+  if (items.length === 0){
+    list.innerHTML = '<div class="hist-empty">Записей за этот день нет.</div>';
+    return;
+  }
+  for (const e of items){
+    if (editingId === e.i){
+      const ed = document.createElement('div');
+      ed.className = 'hist-edit';
+      ed.innerHTML =
+        '<input class="he-input" id="he-task" type="text" />' +
+        '<div class="cat-toggle small" id="he-cats">' +
+          '<button type="button" class="cat" data-cat="k">Коммерч.</button>' +
+          '<button type="button" class="cat" data-cat="n">Некоммерч.</button>' +
+        '</div>' +
+        '<div class="he-time">' +
+          '<input class="he-input" id="he-h" type="number" min="0" max="24" placeholder="ч" inputmode="numeric" />' +
+          '<input class="he-input" id="he-m" type="number" min="0" max="59" placeholder="мин" inputmode="numeric" />' +
+        '</div>' +
+        '<div class="he-actions">' +
+          '<button class="btn primary he-save">Сохранить</button>' +
+          '<button class="btn ghost he-cancel">Отмена</button>' +
+        '</div>';
+      ed.querySelector('#he-task').value = e.t || '';
+      const mm = Math.round(e.s/60);
+      ed.querySelector('#he-h').value = Math.floor(mm/60);
+      ed.querySelector('#he-m').value = mm % 60;
+      editCat = e.c;
+      ed.querySelectorAll('#he-cats .cat').forEach(b => {
+        b.classList.toggle('active', b.dataset.cat === editCat);
+        b.addEventListener('click', () => {
+          editCat = b.dataset.cat;
+          ed.querySelectorAll('#he-cats .cat').forEach(x => x.classList.toggle('active', x === b));
+        });
+      });
+      ed.querySelector('.he-save').addEventListener('click', () => saveEdit(e.i));
+      ed.querySelector('.he-cancel').addEventListener('click', () => { editingId = null; renderHistory(); });
+      list.appendChild(ed);
+    } else {
+      const row = document.createElement('div');
+      row.className = 'entry';
+      row.innerHTML =
+        '<span class="tag ' + e.c + '"></span>' +
+        '<span class="task"></span>' +
+        '<span class="dur"></span>' +
+        '<button class="edit" aria-label="Изменить">✎</button>' +
+        '<button class="del" aria-label="Удалить">×</button>';
+      row.querySelector('.task').textContent = e.t || 'Без названия';
+      row.querySelector('.dur').textContent = fmtHM(e.s);
+      row.querySelector('.edit').addEventListener('click', () => { editingId = e.i; renderHistory(); });
+      row.querySelector('.del').addEventListener('click', () => deleteEntry(e.i));
+      list.appendChild(row);
+    }
+  }
 }
 
 /* живой тик раз в секунду */
@@ -636,7 +811,7 @@ setInterval(() => {
     renderTick();
     renderStats();
     const live = document.getElementById('live-dur');
-    if (live) live.textContent = fmtHMS(currentElapsed());
+    if (live) live.textContent = liveDurText();
   }
 }, 1000);
 
@@ -821,7 +996,7 @@ document.getElementById('task').addEventListener('input', () => {
     persistRunning();
   }
 });
-document.getElementById('btn-start').addEventListener('click', startTimer);
+document.getElementById('btn-start').addEventListener('click', () => startTimer());
 document.getElementById('btn-pause').addEventListener('click', pauseTimer);
 document.getElementById('btn-resume').addEventListener('click', resumeTimer);
 document.getElementById('btn-stop').addEventListener('click', stopTimer);
@@ -843,6 +1018,15 @@ document.querySelectorAll('#seg-cat button').forEach(b => {
 document.getElementById('btn-report').addEventListener('click', showReport);
 document.getElementById('btn-copy').addEventListener('click', copyReport);
 
+/* --- Навигация по дням истории --- */
+document.getElementById('hist-prev').addEventListener('click', () => shiftHistDate(-1));
+document.getElementById('hist-next').addEventListener('click', () => shiftHistDate(1));
+document.getElementById('hist-date').addEventListener('change', (e) => {
+  histDate = e.target.value || todayStr();
+  editingId = null;
+  renderHistory();
+});
+
 if (navigator.share){
   const sh = document.getElementById('btn-share');
   sh.hidden = false;
@@ -861,6 +1045,8 @@ if (navigator.share){
   document.getElementById('week-range').textContent = 'с ' + ruDate(wk) + ' (пт–чт)';
   document.getElementById('month-name').textContent = MONTHS[new Date().getMonth()];
   document.getElementById('m-date').value = todayStr();
+  histDate = todayStr();
+  document.getElementById('hist-date').value = histDate;
   document.getElementById('storage-note').textContent = useCloud
     ? 'Данные сохраняются в облаке Telegram'
     : 'Локальное сохранение · откройте внутри Telegram для синхронизации';
